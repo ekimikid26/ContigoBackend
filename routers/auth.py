@@ -1,0 +1,181 @@
+from fastapi import APIRouter, Depends, HTTPException, status
+from supabase import Client
+from database import get_supabase
+from schemas.user import UserCreate, Token, UserResponse, LoginRequest, ResetPasswordRequest, ForgotPasswordRequest
+from utils.password_handler import get_password_hash, verify_password
+from utils.jwt_handler import create_access_token, create_refresh_token, decode_token
+import uuid
+from datetime import datetime, timedelta
+import smtplib
+import os
+import random
+import string
+from email.mime.text import MIMEText
+
+router = APIRouter(prefix="/auth", tags=["auth"])
+
+@router.post("/register", response_model=Token)
+def register(user_data: UserCreate, supabase: Client = Depends(get_supabase)):
+    # Check if email exists
+    existing = supabase.table("users").select("id").eq("correo", user_data.correo).execute()
+    if existing.data:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    hashed_password = get_password_hash(user_data.password)
+    uid = str(uuid.uuid4())
+    
+    # Mapeo exacto de campos según supabase_schema.sql
+    new_user = {
+        "uid": uid,
+        "nombre": user_data.nombre,
+        "correo": user_data.correo,
+        "password_hash": hashed_password,
+        "rol": user_data.rol,
+        "edad": user_data.edad,
+        "sexo": user_data.sexo,
+        "contacto_emergencia_nombre": user_data.emergencia_nombre,
+        "contacto_emergencia_telefono": user_data.emergencia_tel,
+        "lista_medicamentos": user_data.medicamentos,
+        "alergias": user_data.alergias,
+        "plan_tratamiento": user_data.plan_tratamiento,
+        "cedula_profesional": user_data.cedula_profesional,
+        "licenciatura_psicologia": user_data.institucion_licenciatura,
+        "cedula_especialidad": user_data.cedula_especialidad,
+        "especialidad": user_data.tipo_especialidad,
+        "anios_experiencia": user_data.anios_experiencia,
+        "institucion": user_data.institucion,
+        "enfoque_terapeutico": user_data.enfoque_terapeutico,
+        "telefono": user_data.telefono,
+        "historial_medico": user_data.historial_medico,
+        "activo": True
+    }
+    
+    try:
+        response = supabase.table("users").insert(new_user).execute()
+        if not response.data:
+            raise HTTPException(status_code=500, detail="Error creating user in Database")
+    except Exception as e:
+        print(f"DEBUG: Supabase error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    
+    db_user = response.data[0]
+    
+    access_token = create_access_token(data={"user_id": db_user["id"], "uid": uid, "rol": db_user["rol"]})
+    refresh_token = create_refresh_token(data={"user_id": db_user["id"]})
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "user": db_user
+    }
+
+@router.post("/login", response_model=Token)
+def login(user_data: LoginRequest, supabase: Client = Depends(get_supabase)):
+    try:
+        # Búsqueda insensible a mayúsculas/minúsculas para el correo
+        response = supabase.table("users").select("*").ilike("correo", user_data.correo).execute()
+        if not response.data:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales incorrectas")
+
+        user = response.data[0]
+
+        # Depuración de hash malformado
+        db_hash = user.get("password_hash", "")
+        if not verify_password(user_data.password, db_hash):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales incorrectas")
+
+        if not user.get("activo", True):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cuenta desactivada. Contacta al administrador.")
+
+        access_token = create_access_token(data={"user_id": user["id"], "uid": user["uid"], "rol": user["rol"]})
+        refresh_token = create_refresh_token(data={"user_id": user["id"]})
+
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "user": user
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"DEBUG: Login error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+@router.post("/refresh", response_model=dict)
+def refresh(refresh_token: str, supabase: Client = Depends(get_supabase)):
+    payload = decode_token(refresh_token)
+    if not payload:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+    
+    user_id = payload.get("user_id")
+    response = supabase.table("users").select("*").eq("id", user_id).execute()
+    if not response.data:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    
+    user = response.data[0]
+    new_access_token = create_access_token(data={"user_id": user["id"], "uid": user["uid"], "rol": user["rol"]})
+    return {"access_token": new_access_token, "token_type": "bearer"}
+
+@router.post("/forgot-password")
+def forgot_password(email: str, supabase: Client = Depends(get_supabase)):
+    response = supabase.table("users").select("*").eq("correo", email).execute()
+    if not response.data:
+        return {"message": "Si el correo existe recibirás instrucciones"}
+    
+    user = response.data[0]
+    token = ''.join(random.choices(string.digits, k=6))
+    expires_at = (datetime.utcnow() + timedelta(hours=1)).isoformat()
+    
+    supabase.table("password_reset_tokens").insert({
+        "user_id": user["id"],
+        "token": token,
+        "expires_at": expires_at
+    }).execute()
+    
+    try:
+        smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
+        smtp_port = int(os.getenv("SMTP_PORT", "587"))
+        smtp_user = os.getenv("SMTP_USER")
+        smtp_password = os.getenv("SMTP_PASSWORD")
+        
+        msg = MIMEText(
+            f"Hola {user['nombre']},\n\n"
+            f"Tu código de recuperación es: {token}\n\n"
+            f"Este código expira en 1 hora.\n"
+            f"Si no solicitaste este código ignora este mensaje."
+        )
+        msg['From'] = smtp_user
+        msg['To'] = email
+        msg["Subject"] = "Recupera tu acceso a Contigo"
+        
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.send_message(msg)
+    except Exception as e:
+        print(f"Error sending email: {e}")
+            
+    return {"message": "Si el correo existe recibirás instrucciones"}
+
+@router.post("/reset-password")
+def reset_password(request: ResetPasswordRequest, supabase: Client = Depends(get_supabase)):
+    now = datetime.utcnow().isoformat()
+    response = supabase.table("password_reset_tokens")\
+        .select("*")\
+        .eq("token", request.token)\
+        .eq("used", False)\
+        .gt("expires_at", now)\
+        .execute()
+    
+    if not response.data:
+        raise HTTPException(status_code=400, detail="Código inválido o expirado")
+    
+    reset_token = response.data[0]
+    hashed_password = get_password_hash(request.new_password)
+    
+    supabase.table("users").update({"password_hash": hashed_password}).eq("id", reset_token["user_id"]).execute()
+    supabase.table("password_reset_tokens").update({"used": True}).eq("id", reset_token["id"]).execute()
+    
+    return {"message": "Tu contraseña fue actualizada correctamente"}

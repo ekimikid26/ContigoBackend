@@ -1,0 +1,2 @@
+class NotaEspecialista:
+    pass
