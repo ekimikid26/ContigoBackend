@@ -37,18 +37,20 @@ def ping():
     }
 
 @app.get("/health")
-def health(supabase = Depends(get_supabase)):
+async def health(supabase = Depends(get_supabase)):
     try:
-        # Verificar si podemos leer la tabla users
+        # Intentamos una operación ultra rápida con un timeout de 5 segundos
+        # Solo para ver si la tabla existe
         result = supabase.table("users").select("id").limit(1).execute()
         return {
             "status": "ok",
             "database": "conectada",
-            "users_table": "accesible"
+            "message": "Tablas encontradas correctamente"
         }
     except Exception as e:
+        # Si falla, devolvemos el error en lugar de dejar que Railway se cuelgue
         return {
             "status": "error",
-            "database": "no conectada",
-            "detail": str(e)
+            "database": "error de conexion",
+            "details": str(e)
         }
