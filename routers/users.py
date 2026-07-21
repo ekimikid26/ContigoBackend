@@ -64,7 +64,11 @@ def admin_update_user(
     return {"message": "Usuario actualizado"}
 
 @router.get("/patients")
-def get_my_patients(current_user: dict = Depends(get_current_user), supabase: Client = Depends(get_supabase)):
+def get_my_patients(
+    activa: bool = True,
+    current_user: dict = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase)
+):
     if current_user["rol"] != "especialista":
         raise HTTPException(status_code=403, detail="Only specialists can view patients")
     
@@ -72,7 +76,7 @@ def get_my_patients(current_user: dict = Depends(get_current_user), supabase: Cl
     vinculaciones = supabase.table("vinculaciones")\
         .select("paciente_id")\
         .eq("especialista_id", current_user["id"])\
-        .eq("activa", True).execute()
+        .eq("activa", activa).execute()
     
     patient_ids = [v["paciente_id"] for v in vinculaciones.data]
     if not patient_ids:
