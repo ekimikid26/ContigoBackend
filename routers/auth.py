@@ -119,8 +119,8 @@ def refresh(refresh_token: str, supabase: Client = Depends(get_supabase)):
     return {"access_token": new_access_token, "token_type": "bearer"}
 
 @router.post("/forgot-password")
-def forgot_password(email: str, supabase: Client = Depends(get_supabase)):
-    response = supabase.table("users").select("*").eq("correo", email).execute()
+def forgot_password(request: ForgotPasswordRequest, supabase: Client = Depends(get_supabase)):
+    response = supabase.table("users").select("*").eq("correo", request.correo).execute()
     if not response.data:
         return {"message": "Si el correo existe recibirás instrucciones"}
     
@@ -140,6 +140,10 @@ def forgot_password(email: str, supabase: Client = Depends(get_supabase)):
         smtp_user = os.getenv("SMTP_USER")
         smtp_password = os.getenv("SMTP_PASSWORD")
         
+        if not smtp_user or not smtp_password:
+            print("WARNING: SMTP credentials missing. Check environment variables.")
+            return {"message": "Si el correo existe recibirás instrucciones"}
+
         msg = MIMEText(
             f"Hola {user['nombre']},\n\n"
             f"Tu código de recuperación es: {token}\n\n"
@@ -147,15 +151,17 @@ def forgot_password(email: str, supabase: Client = Depends(get_supabase)):
             f"Si no solicitaste este código ignora este mensaje."
         )
         msg['From'] = smtp_user
-        msg['To'] = email
+        msg['To'] = request.correo
         msg["Subject"] = "Recupera tu acceso a Contigo"
         
+        print(f"DEBUG: Attempting to send email to {request.correo} via {smtp_host}")
         with smtplib.SMTP(smtp_host, smtp_port) as server:
             server.starttls()
             server.login(smtp_user, smtp_password)
             server.send_message(msg)
+        print("DEBUG: Email sent successfully")
     except Exception as e:
-        print(f"Error sending email: {e}")
+        print(f"CRITICAL ERROR sending email: {e}")
             
     return {"message": "Si el correo existe recibirás instrucciones"}
 
