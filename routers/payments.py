@@ -201,6 +201,7 @@ async def cancel_subscription(
     supabase: Client = Depends(get_supabase)
 ):
     """Cancela la suscripción activa del usuario en Mercado Pago y en la BD."""
+    # Check ownership: only cancel my own subscription
     existing = supabase.table("subscriptions")\
         .select("*")\
         .eq("user_id", current_user["id"])\
